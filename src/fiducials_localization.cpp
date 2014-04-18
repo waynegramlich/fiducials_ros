@@ -54,9 +54,12 @@
 #include "fiducials/List.h"
 #include "fiducials/Logical.h"
 
+#include "fiducials_ros/Fiducial.h"
+
 class FiducialsNode {
   private:
     ros::Publisher * marker_pub;
+    ros::Publisher * vertices_pub;
     image_transport::Subscriber img_sub;
 
     // transform bits
@@ -71,6 +74,8 @@ class FiducialsNode {
 
     // the last frame we saw on the camera header
     std::string last_camera_frame;
+
+    int last_image_seq;
 
     // if set, we publish the images that contain fiducials
     bool publish_images;
@@ -102,6 +107,7 @@ class FiducialsNode {
     static void arc_announce(void *t, int from_id, double from_x,
         double from_y, double from_z, int to_id, double to_x, double to_y,
         double to_z, double goodness, int in_spanning_tree);
+
     static void tag_announce(void *t, int id, double x, double y, double z,
         double twist, double diagonal, double distance_per_pixel, int visible,
         int hop_count);
@@ -111,6 +117,14 @@ class FiducialsNode {
     static void location_announce(void *t, int id, double x, double y,
         double z, double bearing);
     void location_cb(int id, double x, double y, double z, double bearing);
+
+    static void fiducial_announce(void *t,
+    int id, int direction, double world_diagonal,
+        double x0, double y0, double x1, double y1,
+        double x2, double y2, double x3, double y3);
+    void fiducial_cb(int id, int direction, double world_diagonal,
+        double x0, double y0, double x1, double y1,
+        double x2, double y2, double x3, double y3);
 
     void imageCallback(const sensor_msgs::ImageConstPtr & msg);
 
@@ -156,6 +170,40 @@ void FiducialsNode::tag_announce(void *t, int id, double x, double y, double z,
     double dz = 1.0;
     ths->tag_cb(id, x, y, z, twist, dx, dy, dz, visible);
 }
+
+void FiducialsNode::fiducial_announce(void *t,
+    int id, int direction, double world_diagonal,
+    double x0, double y0, double x1, double y1,
+    double x2, double y2, double x3, double y3) {
+
+    FiducialsNode * ths = (FiducialsNode*)t;
+    ths->fiducial_cb(id, direction, world_diagonal, 
+        x0, y0, x1, y1, x2, y2, x3, y3);
+}
+
+void FiducialsNode::fiducial_cb(int id, int direction, double world_diagonal,
+    double x0, double y0, double x1, double y1,
+    double x2, double y2, double x3, double y3)
+{
+    fiducials_ros::Fiducial fid;
+
+    ROS_INFO("fiducial: id=%d dir=%d diag=%f (%.2f,%.2f), (%.2f,%.2f), (%.2f,%.2f), (%.2f,%.2f)",
+       id, direction, world_diagonal, x0, y0, x1, y1, x2, y2, x3, y3);
+
+    fid.header.stamp = ros::Time::now();
+    fid.header.frame_id = last_camera_frame;
+    fid.image_seq = last_image_seq;
+    fid.direction = direction;
+    fid.fiducial_id = id;
+    fid.x0 = x0; fid.y0 = y0;
+    fid.x1 = x1; fid.y1 = y1;
+    fid.x2 = x2; fid.y2 = y2;
+    fid.x3 = x3; fid.y3 = y3;
+
+    vertices_pub->publish(fid);
+}
+
+
 
 void FiducialsNode::tag_cb(int id, double x, double y, double z, double twist,
     double dx, double dy, double dz, int visible) {
@@ -251,6 +299,7 @@ void FiducialsNode::location_cb(int id, double x, double y, double z,
         // get odometry position from TF
         tf2::Quaternion tf_quat;
         tf_quat.setRPY(0.0, 0.0, tf_yaw);
+
         tf2::Transform pose(tf_quat, tf2::Vector3(tf_x, tf_y, 0));
 
 
@@ -322,6 +371,7 @@ void FiducialsNode::location_cb(int id, double x, double y, double z,
 void FiducialsNode::imageCallback(const sensor_msgs::ImageConstPtr & msg) {
     ROS_INFO("Got image");
     last_camera_frame = msg->header.frame_id;
+    last_image_seq = msg->header.seq;
     try {
         cv_bridge::CvImageConstPtr cv_img;
         cv_img = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
@@ -340,6 +390,7 @@ void FiducialsNode::imageCallback(const sensor_msgs::ImageConstPtr & msg) {
 	    fiducials_create->log_file_name = log_file.c_str();
 	    fiducials_create->map_base_name = map_file.c_str();
 	    fiducials_create->tag_heights_file_name = tag_height_file.c_str();
+            fiducials_create->fiducial_announce_routine = fiducial_announce;
 
 	    // Create *fiducials* object using first image:
             fiducials = Fiducials__create(image, fiducials_create);
@@ -414,7 +465,9 @@ FiducialsNode::FiducialsNode(ros::NodeHandle & nh) : scale(0.75), tf_sub(tf_buff
     }
 
     marker_pub = new ros::Publisher(nh.advertise<visualization_msgs::Marker>("fiducials", 1));
-    
+   
+    vertices_pub = new ros::Publisher(nh.advertise<fiducials_ros::Fiducial>("vertices", 1));
+ 
     fiducials = NULL;
 
     img_sub = img_transport.subscribe("camera", 1,
